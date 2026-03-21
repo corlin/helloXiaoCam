@@ -113,7 +113,7 @@ esp_err_t stream_handler(httpd_req_t *req) {
         fb = esp_camera_fb_get();
         if (!fb) { res = ESP_FAIL; } 
         else {
-            size_t hlen = snprintf(part_buf, 128, "\r\n--123456789000000000000987654321\r\nContent-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n", fb->len);
+            size_t hlen = snprintf(part_buf, 128, "\r\n--123456789000000000000987654321\r\nContent-Type: image/jpeg\r\nContent-Length: %zu\r\n\r\n", fb->len);
             res = httpd_resp_send_chunk(req, part_buf, hlen);
             if (res == ESP_OK) res = httpd_resp_send_chunk(req, (const char *)fb->buf, fb->len);
             esp_camera_fb_return(fb);
@@ -150,10 +150,7 @@ esp_err_t control_handler(httpd_req_t *req) {
 }
 
 void start_camera_server() {
-    httpd_config_t config_main = HTTPD_DEFAULT_CONFIG(); 
-    config_main.server_port = 80; 
-    config_main.ctrl_port = 32768; 
-    config_main.lru_purge_enable = true;
+    httpd_config_t config_main = HTTPD_DEFAULT_CONFIG(); config_main.server_port = 80; config_main.ctrl_port = 32768; config_main.lru_purge_enable = true;
     httpd_handle_t server = NULL;
     httpd_uri_t index_uri = { .uri = "/", .method = HTTP_GET, .handler = index_handler };
     httpd_uri_t status_uri = { .uri = "/status", .method = HTTP_GET, .handler = status_handler };
@@ -164,11 +161,7 @@ void start_camera_server() {
         httpd_register_uri_handler(server, &control_uri);
         ESP_LOGI(TAG, "Server(80) OK");
     }
-
-    httpd_config_t config_stream = HTTPD_DEFAULT_CONFIG();
-    config_stream.server_port = 81;
-    config_stream.ctrl_port = 32770; // Higher offset to avoid range issues
-    config_stream.lru_purge_enable = true;
+    httpd_config_t config_stream = HTTPD_DEFAULT_CONFIG(); config_stream.server_port = 81; config_stream.ctrl_port = 32770; config_stream.lru_purge_enable = true;
     httpd_handle_t s_server = NULL;
     httpd_uri_t stream_uri = { .uri = "/stream", .method = HTTP_GET, .handler = stream_handler };
     httpd_uri_t s_head = { .uri = "/stream", .method = HTTP_HEAD, .handler = stream_handler };
@@ -176,8 +169,6 @@ void start_camera_server() {
         httpd_register_uri_handler(s_server, &stream_uri);
         httpd_register_uri_handler(s_server, &s_head);
         ESP_LOGI(TAG, "Stream(81) OK");
-    } else {
-        ESP_LOGE(TAG, "Server(81) FAIL. Try different ctrl_port.");
     }
 }
 
@@ -193,7 +184,6 @@ static void prov_event_handler(void* arg, esp_event_base_t event_base, int32_t e
     if (event_base == WIFI_PROV_EVENT) {
         switch (event_id) {
             case WIFI_PROV_START:
-                wifi_prov_mgr_endpoint_create("xiao-status");
                 wifi_prov_mgr_endpoint_register("xiao-status", custom_prov_data_handler, NULL);
                 break;
             case WIFI_PROV_CRED_RECV: s_retry_num = 0; break;
@@ -222,11 +212,16 @@ static void wifi_init() {
     ESP_ERROR_CHECK(esp_event_handler_register(WIFI_PROV_EVENT, ESP_EVENT_ANY_ID, &prov_event_handler, NULL));
     ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &event_handler, NULL));
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &event_handler, NULL));
-    wifi_prov_mgr_config_t p_cfg = { .scheme = wifi_prov_scheme_ble, .scheme_event_handler = WIFI_PROV_SCHEME_BLE_EVENT_HANDLER_FREE_BTDM };
+    // Use braced initializer for the nested event handler struct
+    wifi_prov_mgr_config_t p_cfg = { 
+        .scheme = wifi_prov_scheme_ble, 
+        .scheme_event_handler = { .event_cb = wifi_prov_scheme_ble_event_cb_free_btdm, .user_data = NULL } 
+    };
     ESP_ERROR_CHECK(wifi_prov_mgr_init(p_cfg));
     bool provisioned = false; wifi_prov_mgr_is_provisioned(&provisioned);
     if (!provisioned) {
         ESP_LOGI(TAG, "Starting XIAO_CAM_PROV...");
+        if (wifi_prov_mgr_endpoint_create("xiao-status") != ESP_OK) { ESP_LOGE(TAG, "Fail endpoint create"); }
         ESP_ERROR_CHECK(wifi_prov_mgr_start_provisioning(WIFI_PROV_SECURITY_0, NULL, "XIAO_CAM_PROV", NULL));
         xEventGroupWaitBits(s_wifi_event_group, WIFI_CONNECTED_BIT, pdFALSE, pdFALSE, portMAX_DELAY);
     } else {
@@ -237,33 +232,27 @@ static void wifi_init() {
 }
 
 static void factory_reset_check() {
-    gpio_config_t io_conf = { .pin_bit_mask = (1ULL << GPIO_NUM_0), .mode = GPIO_MODE_INPUT, .pull_up_en = GPIO_PULLUP_ENABLE }; 
-    gpio_config(&io_conf);
+    gpio_config_t io_conf = { .pin_bit_mask = (1ULL << GPIO_NUM_0), .mode = GPIO_MODE_INPUT, .pull_up_en = GPIO_PULLUP_ENABLE }; gpio_config(&io_conf);
     if (gpio_get_level(GPIO_NUM_0) == 0) {
         ESP_LOGI(TAG, "RESET START: Hold BOOT for 3 seconds...");
-        int count = 0; 
-        while (count < 30) { 
-            if (gpio_get_level(GPIO_NUM_0) != 0) { ESP_LOGI(TAG, "Aborted."); return; }
-            vTaskDelay(pdMS_TO_TICKS(100)); 
-            count++; 
-            if (count % 10 == 0) ESP_LOGI(TAG, "Holding... %ds", count/10);
-        }
-        ESP_LOGW(TAG, "FACTORY RESET TRIGGERED!");
-        nvs_flash_erase(); esp_restart();
+        int count = 0; while (count < 30) { if (gpio_get_level(GPIO_NUM_0) != 0) { ESP_LOGI(TAG, "Aborted."); return; }
+            vTaskDelay(pdMS_TO_TICKS(100)); count++; if (count % 10 == 0) ESP_LOGI(TAG, "Holding... %ds", count/10); }
+        ESP_LOGW(TAG, "FACTORY RESET TRIGGERED!"); nvs_flash_erase(); esp_restart();
     }
 }
 
 static void init_temp_sensor() {
-    temperature_sensor_config_t t_cfg = TEMPERATURE_SENSOR_CONFIG_DEFAULT(-10, 80);
+    temperature_sensor_config_t t_cfg = {
+        .range_min = -10,
+        .range_max = 80,
+    };
     ESP_ERROR_CHECK(temperature_sensor_install(&t_cfg, &temp_sensor)); ESP_ERROR_CHECK(temperature_sensor_enable(temp_sensor));
 }
 
 void app_main(void) {
-    ESP_ERROR_CHECK(nvs_flash_init()); 
-    gpio_reset_pin(USER_LED_PIN); gpio_set_direction(USER_LED_PIN, GPIO_MODE_OUTPUT);
+    ESP_ERROR_CHECK(nvs_flash_init()); gpio_reset_pin(USER_LED_PIN); gpio_set_direction(USER_LED_PIN, GPIO_MODE_OUTPUT);
     ESP_LOGI(TAG, "Wait 1s for manual reset trigger..."); vTaskDelay(pdMS_TO_TICKS(1000));
-    factory_reset_check();
-    init_temp_sensor();
+    factory_reset_check(); init_temp_sensor();
     if (esp_camera_init(&camera_config) != ESP_OK) { ESP_LOGE(TAG, "Cam fail"); return; }
     sensor_t * s = esp_camera_sensor_get(); s->set_framesize(s, FRAMESIZE_VGA);
     wifi_init(); start_camera_server();
